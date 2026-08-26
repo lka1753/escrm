@@ -4,6 +4,11 @@ import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 
+function formValue(formData: FormData, name: string) {
+  const value = formData.get(name)
+  return value == null ? null : String(value).trim() || null
+}
+
 async function getSessionProfile() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -17,21 +22,33 @@ async function getSessionProfile() {
 export async function createLead(formData: FormData) {
   const { supabase, profile } = await getSessionProfile()
   if (profile.role !== 'super_admin') redirect('/')
-  const source = String(formData.get('source') || 'manual') as any
+
   const { error } = await supabase.rpc('create_lead_admin', {
-    p_name: String(formData.get('name') || ''),
-    p_mobile: String(formData.get('mobile') || ''),
-    p_alternate_mobile: String(formData.get('alternate_mobile') || ''),
-    p_email: String(formData.get('email') || ''),
-    p_pickup: String(formData.get('pickup_location') || ''),
-    p_drop: String(formData.get('drop_location') || ''),
-    p_moving_date: String(formData.get('moving_date') || '') || null,
-    p_service_type: String(formData.get('service_type') || ''),
-    p_property_size: String(formData.get('property_size') || ''),
-    p_source: source,
-    p_source_detail: String(formData.get('source_detail') || ''),
-    p_notes: String(formData.get('notes') || ''),
+    p_name: formValue(formData, 'name') || '',
+    p_mobile: formValue(formData, 'mobile') || '',
+    p_alternate_mobile: formValue(formData, 'alternate_mobile'),
+    p_email: formValue(formData, 'email'),
+    p_pickup: formValue(formData, 'pickup_location'),
+    p_drop: formValue(formData, 'drop_location'),
+    p_moving_date: formValue(formData, 'moving_date'),
+    p_service_type: formValue(formData, 'service_type'),
+    p_property_size: formValue(formData, 'property_size'),
+    p_source: formValue(formData, 'source') || 'manual',
+    p_source_detail: formValue(formData, 'source_detail'),
+    p_notes: formValue(formData, 'notes'),
+    p_gclid: formValue(formData, 'gclid'),
+    p_gbraid: formValue(formData, 'gbraid'),
+    p_wbraid: formValue(formData, 'wbraid'),
+    p_fbclid: formValue(formData, 'fbclid'),
+    p_utm_source: formValue(formData, 'utm_source'),
+    p_utm_medium: formValue(formData, 'utm_medium'),
+    p_utm_campaign: formValue(formData, 'utm_campaign'),
+    p_utm_term: formValue(formData, 'utm_term'),
+    p_utm_content: formValue(formData, 'utm_content'),
+    p_landing_page: formValue(formData, 'landing_page'),
+    p_referrer: formValue(formData, 'referrer'),
   })
+
   if (error) throw new Error(error.message)
   revalidatePath('/leads')
   revalidatePath('/')
