@@ -15,6 +15,7 @@ type Lead = {
 }
 
 type Company = { id: string; name: string; company_code: string }
+type Profile = { full_name: string; role: string; company_id: string | null; status: string }
 
 function statusClass(status: string) {
   if (['booking_confirmed', 'move_completed'].includes(status)) return 'green'
@@ -29,8 +30,8 @@ export default async function Home() {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  const [{ data: profile }, { count: totalLeads }, { count: unassigned }, { count: bookings }, { data: leads }, { data: companies }] = await Promise.all([
-    supabase.from('user_profiles').select('full_name, role, company_id').eq('id', user.id).maybeSingle(),
+  const [{ data: profileRows }, { count: totalLeads }, { count: unassigned }, { count: bookings }, { data: leads }, { data: companies }] = await Promise.all([
+    supabase.rpc('get_my_profile'),
     supabase.from('leads').select('*', { count: 'exact', head: true }),
     supabase.from('leads').select('*', { count: 'exact', head: true }).is('assigned_company_id', null),
     supabase.from('leads').select('*', { count: 'exact', head: true }).in('status', ['booking_confirmed', 'move_completed']),
@@ -38,6 +39,7 @@ export default async function Home() {
     supabase.from('companies').select('id,name,company_code').order('name'),
   ])
 
+  const profile = ((profileRows ?? [])[0] ?? null) as Profile | null
   if (!profile) redirect('/login?error=CRM%20profile%20not%20configured')
   const isAdmin = profile.role === 'super_admin'
   const companyMap = new Map((companies ?? []).map(c => [c.id, c.name]))
