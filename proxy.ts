@@ -1,8 +1,10 @@
-import { type NextRequest } from 'next/server'
-import { updateSession } from '@/lib/supabase/proxy'
+import { NextResponse, type NextRequest } from 'next/server'
 
-export async function proxy(request: NextRequest) {
-  return await updateSession(request)
+// Authentication is handled by the browser-side Supabase client.
+// Keep the Next.js proxy free of Supabase server credentials so production
+// deployments do not fail when middleware environment variables are unavailable.
+export function proxy(request: NextRequest) {
+  return NextResponse.next({ request })
 }
 
 export const config = {
