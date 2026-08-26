@@ -22,7 +22,14 @@ export async function createPartner(formData: FormData) {
   const phone = String(formData.get('phone') || '').trim() || null
   const email = String(formData.get('email') || '').trim() || null
   if (!name || !code) return
-  await supabase.from('companies').insert({ name, company_code: code, contact_person: contact, phone, email, is_owner: false, status: 'active' })
+  const { error } = await supabase.rpc('admin_create_company', {
+    p_name: name,
+    p_company_code: code,
+    p_contact_person: contact,
+    p_phone: phone,
+    p_email: email,
+  })
+  if (error) console.error('admin_create_company failed', error)
   revalidatePath('/partners')
   revalidatePath('/')
 }
@@ -35,8 +42,16 @@ export async function updatePartner(formData: FormData) {
   const phone = String(formData.get('phone') || '').trim() || null
   const email = String(formData.get('email') || '').trim() || null
   const status = String(formData.get('status') || 'active')
-  if (!id || !name) return
-  await supabase.from('companies').update({ name, contact_person: contact, phone, email, status, updated_at: new Date().toISOString() }).eq('id', id).eq('is_owner', false)
+  if (!id || !name || !['active', 'inactive'].includes(status)) return
+  const { error } = await supabase.rpc('admin_update_company', {
+    p_id: id,
+    p_name: name,
+    p_contact_person: contact,
+    p_phone: phone,
+    p_email: email,
+    p_status: status,
+  })
+  if (error) console.error('admin_update_company failed', error)
   revalidatePath('/partners')
   revalidatePath('/')
 }
