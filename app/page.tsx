@@ -26,12 +26,11 @@ function pretty(value: string) { return value.replaceAll('_', ' ').replace(/\b\w
 
 export default async function Home() {
   const supabase = await createClient()
-  const { data: claimsData } = await supabase.auth.getClaims()
-  const claims = claimsData?.claims
-  if (!claims?.sub) redirect('/login')
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) redirect('/login')
 
   const [{ data: profile }, { count: totalLeads }, { count: unassigned }, { count: bookings }, { data: leads }, { data: companies }] = await Promise.all([
-    supabase.from('user_profiles').select('full_name, role, company_id').eq('id', claims.sub).maybeSingle(),
+    supabase.from('user_profiles').select('full_name, role, company_id').eq('id', user.id).maybeSingle(),
     supabase.from('leads').select('*', { count: 'exact', head: true }),
     supabase.from('leads').select('*', { count: 'exact', head: true }).is('assigned_company_id', null),
     supabase.from('leads').select('*', { count: 'exact', head: true }).in('status', ['booking_confirmed', 'move_completed']),
