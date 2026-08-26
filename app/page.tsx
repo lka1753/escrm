@@ -15,6 +15,7 @@ type Lead = {
 }
 
 type Company = { id: string; name: string; company_code: string; is_owner: boolean }
+type Assignment = { lead_id: string; company_id: string }
 type Profile = { full_name: string; role: string; company_id: string | null; status: string }
 
 function statusClass(status: string) {
@@ -30,19 +31,25 @@ export default async function Home() {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  const [{ data: profileRows }, { count: totalLeads }, { count: unassigned }, { count: bookings }, { data: leads }, { data: companies }] = await Promise.all([
+  const [{ data: profileRows }, { count: totalLeads }, { count: unassigned }, { count: bookings }, { data: leads }, { data: companies }, { data: assignments }] = await Promise.all([
     supabase.rpc('get_my_profile'),
     supabase.from('leads').select('*', { count: 'exact', head: true }),
     supabase.from('leads').select('*', { count: 'exact', head: true }).is('assigned_company_id', null),
     supabase.from('leads').select('*', { count: 'exact', head: true }).in('status', ['booking_confirmed', 'move_completed']),
     supabase.from('leads').select('id,lead_number,name,mobile,pickup_location,drop_location,source,status,assigned_company_id,booking_value').order('created_at', { ascending: false }).limit(8),
     supabase.from('companies').select('id,name,company_code,is_owner').order('is_owner', { ascending: false }).order('name'),
+    supabase.from('lead_assignments').select('lead_id,company_id').eq('status','active'),
   ])
 
   const profile = ((profileRows ?? [])[0] ?? null) as Profile | null
   if (!profile) redirect('/login?error=CRM%20profile%20not%20configured')
   const isAdmin = profile.role === 'super_admin'
   const companyMap = new Map((companies ?? []).map(c => [c.id, c.name]))
+  const assignmentMap = new Map<string,string[]>()
+  for (const a of ((assignments ?? []) as Assignment[])) {
+    const name = companyMap.get(a.company_id)
+    if (name) assignmentMap.set(a.lead_id,[...(assignmentMap.get(a.lead_id) ?? []),name])
+  }
   const recentLeads = (leads ?? []) as Lead[]
   const partnerCompanies = (companies ?? []) as Company[]
   const activePartners = partnerCompanies.filter(c => !c.is_owner)
@@ -54,8 +61,8 @@ export default async function Home() {
     <main className="main">
       <header className="top"><div className="title"><h1>Dashboard</h1><p>Central control center for Easy Shift leads</p></div><div className="admin-wrap"><div className="admin">{profile.full_name} · {pretty(profile.role)}</div><form action="/auth/signout" method="post"><button className="signout" type="submit">Sign out</button></form></div></header>
       <section className="grid"><Metric label="Total Leads" value={String(totalLeads ?? 0)} note="Live from Supabase"/><Metric label="Unassigned" value={String(unassigned ?? 0)} note="Needs attention" warn={(unassigned ?? 0) > 0}/><Metric label="Bookings" value={String(bookings ?? 0)} note="Confirmed / completed"/><Metric label="Partners" value={String(activePartners.length)} note="Active companies"/></section>
-      <section className="section"><div className="section-head"><h2>Recent Leads</h2><span className="link">Live data</span></div><div className="table-wrap"><table className="table"><thead><tr><th>Lead</th><th>Customer</th><th>Route</th><th>Source</th><th>Partner</th><th>Status</th><th>Value</th></tr></thead><tbody>
-        {recentLeads.map(lead => <tr key={lead.id}><td><strong>{lead.lead_number}</strong></td><td>{lead.name}<br/><span className="muted">{lead.mobile}</span></td><td>{lead.pickup_location || '—'} → {lead.drop_location || '—'}</td><td>{pretty(lead.source)}</td><td>{lead.assigned_company_id ? companyMap.get(lead.assigned_company_id) ?? 'Assigned' : 'Unassigned'}</td><td><span className={'status ' + statusClass(lead.status)}>{pretty(lead.status)}</span></td><td>{lead.booking_value ? `₹${Number(lead.booking_value).toLocaleString('en-IN')}` : '—'}</td></tr>)}
+      <section className="section"><div className="section-head"><h2>Recent Leads</h2><span className="link">Live data</span></div><div className="table-wrap"><table className="table"><thead><tr><th>Lead</th><th>Customer</th><th>Route</th><th>Source</th><th>Partners</th><th>Status</th><th>Value</th></tr></thead><tbody>
+        {recentLeads.map(lead => { const names = assignmentMap.get(lead.id) ?? []; const partnerLabel = names.length > 1 ? `All ${names.length} partners` : lead.assigned_company_id ? companyMap.get(lead.assigned_company_id) ?? 'Assigned' : 'Unassigned'; return <tr key={lead.id}><td><strong>{lead.lead_number}</strong></td><td>{lead.name}<br/><span className="muted">{lead.mobile}</span></td><td>{lead.pickup_location || '—'} → {lead.drop_location || '—'}</td><td>{pretty(lead.source)}</td><td title={names.join(', ')}>{partnerLabel}</td><td><span className={'status ' + statusClass(lead.status)}>{pretty(lead.status)}</span></td><td>{lead.booking_value ? `₹${Number(lead.booking_value).toLocaleString('en-IN')}` : '—'}</td></tr>})}
         {recentLeads.length === 0 ? <tr><td colSpan={7} className="empty">No leads yet.</td></tr> : null}
       </tbody></table></div></section>
       <section className="section"><div className="section-head"><h2>Partner Companies</h2><a className="link" href="/partners">Manage partners</a></div><div className="partner-grid">
