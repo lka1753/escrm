@@ -21,7 +21,8 @@ export default async function PartnersPage() {
   const profile = profileRows?.[0]
   if (!profile || profile.role !== 'super_admin' || profile.status !== 'active') redirect('/')
 
-  const { data } = await supabase.from('companies').select('id,name,company_code,contact_person,phone,email,status,is_owner').order('is_owner', { ascending: false }).order('name')
+  const { data, error } = await supabase.rpc('admin_list_companies')
+  if (error) console.error('admin_list_companies failed', error)
   const companies = (data ?? []) as Company[]
 
   return <div className="app">
@@ -56,6 +57,7 @@ export default async function PartnersPage() {
               {!company.is_owner ? <div className="form-end"><button className="secondary" type="submit">Save Changes</button></div> : null}
             </form>
           </div>)}
+          {companies.length === 0 ? <div className="card empty">No companies found.</div> : null}
         </div>
       </section>
     </main>
