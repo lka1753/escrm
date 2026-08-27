@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
+import { notifyPartnersForLead } from '@/lib/telegram'
 
 function formValue(formData: FormData, name: string) {
   const value = formData.get(name)
@@ -23,7 +24,7 @@ export async function createLead(formData: FormData) {
   const { supabase, profile } = await getSessionProfile()
   if (profile.role !== 'super_admin') redirect('/')
 
-  const { error } = await supabase.rpc('create_lead_admin', {
+  const { data: leadId, error } = await supabase.rpc('create_lead_admin', {
     p_name: formValue(formData, 'name') || '',
     p_mobile: formValue(formData, 'mobile') || '',
     p_alternate_mobile: formValue(formData, 'alternate_mobile'),
@@ -49,7 +50,8 @@ export async function createLead(formData: FormData) {
     p_referrer: formValue(formData, 'referrer'),
   })
 
-  if (error) throw new Error(error.message)
+  if (error || !leadId) throw new Error(error?.message || 'Lead was not created')
+  try { await notifyPartnersForLead(String(leadId)) } catch (telegramError) { console.error('Lead created but Telegram notification failed', telegramError) }
   revalidatePath('/leads')
   revalidatePath('/')
 }
