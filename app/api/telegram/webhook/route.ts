@@ -9,8 +9,11 @@ function esc(value: unknown) {
 }
 
 function webhookAuthorized(req: NextRequest) {
+  // Telegram can optionally send X-Telegram-Bot-Api-Secret-Token.
+  // During initial setup, allow the webhook when no secret has been configured.
+  // Once TELEGRAM_WEBHOOK_SECRET is configured, require an exact match.
   const expected = process.env.TELEGRAM_WEBHOOK_SECRET
-  if (!expected) return false
+  if (!expected) return true
   return req.headers.get('x-telegram-bot-api-secret-token') === expected
 }
 
