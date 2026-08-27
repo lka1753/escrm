@@ -1,16 +1,11 @@
-import { createClient as createServerClient } from '@/lib/supabase/server'
+import { createAdminClient } from '@/lib/supabase/admin'
 
 const token = process.env.TELEGRAM_BOT_TOKEN
 const apiBase = token ? `https://api.telegram.org/bot${token}` : null
 
 async function telegram(method: string, body: Record<string, unknown>) {
   if (!apiBase) return null
-  const res = await fetch(`${apiBase}/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-    cache: 'no-store',
-  })
+  const res = await fetch(`${apiBase}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), cache: 'no-store' })
   const json = await res.json().catch(() => null)
   if (!res.ok || !json?.ok) throw new Error(json?.description || `Telegram ${method} failed`)
   return json.result
@@ -35,7 +30,7 @@ export function formatLeadMessage(lead: any, companyName: string) {
 
 export async function notifyPartnersForLead(leadId: string) {
   if (!token) return
-  const supabase = await createServerClient()
+  const supabase = createAdminClient()
   const [{ data: lead }, { data: assignments }] = await Promise.all([
     supabase.from('leads').select('id,lead_number,name,mobile,pickup_location,drop_location,moving_date,service_type,property_size,source').eq('id', leadId).single(),
     supabase.from('lead_assignments').select('id,company_id').eq('lead_id', leadId).eq('status', 'active'),
