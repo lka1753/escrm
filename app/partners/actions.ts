@@ -22,16 +22,9 @@ export async function createPartner(formData: FormData) {
   const phone = String(formData.get('phone') || '').trim() || null
   const email = String(formData.get('email') || '').trim() || null
   if (!name || !code) return
-  const { error } = await supabase.rpc('admin_create_company', {
-    p_name: name,
-    p_company_code: code,
-    p_contact_person: contact,
-    p_phone: phone,
-    p_email: email,
-  })
+  const { error } = await supabase.rpc('admin_create_company', { p_name:name,p_company_code:code,p_contact_person:contact,p_phone:phone,p_email:email })
   if (error) console.error('admin_create_company failed', error)
-  revalidatePath('/partners')
-  revalidatePath('/')
+  revalidatePath('/partners'); revalidatePath('/')
 }
 
 export async function updatePartner(formData: FormData) {
@@ -41,17 +34,12 @@ export async function updatePartner(formData: FormData) {
   const contact = String(formData.get('contact_person') || '').trim() || null
   const phone = String(formData.get('phone') || '').trim() || null
   const email = String(formData.get('email') || '').trim() || null
+  const telegramChatId = String(formData.get('telegram_chat_id') || '').trim() || null
   const status = String(formData.get('status') || 'active')
-  if (!id || !name || !['active', 'inactive'].includes(status)) return
-  const { error } = await supabase.rpc('admin_update_company', {
-    p_id: id,
-    p_name: name,
-    p_contact_person: contact,
-    p_phone: phone,
-    p_email: email,
-    p_status: status,
-  })
-  if (error) console.error('admin_update_company failed', error)
-  revalidatePath('/partners')
-  revalidatePath('/')
+  if (!id || !name || !['active','inactive'].includes(status)) return
+  const { error } = await supabase.rpc('admin_update_company', { p_id:id,p_name:name,p_contact_person:contact,p_phone:phone,p_email:email,p_status:status })
+  if (error) { console.error('admin_update_company failed', error); return }
+  const { error: telegramError } = await supabase.from('companies').update({ telegram_chat_id: telegramChatId }).eq('id', id).eq('is_owner', false)
+  if (telegramError) console.error('telegram_chat_id update failed', telegramError)
+  revalidatePath('/partners'); revalidatePath('/')
 }
