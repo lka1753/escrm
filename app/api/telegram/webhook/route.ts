@@ -43,17 +43,14 @@ export async function POST(req: NextRequest) {
           await answerTelegramCallback(callback.id, `Updated: ${label}`)
           await sendTelegramMessage(chatId, `✅ <b>Status updated</b>\nLead response: <b>${esc(label)}</b>`)
           if (callback.message?.text) {
-            const updated = `${callback.message.text}\n\n<b>Partner response:</b> ${esc(label)}`
             try {
-              await editTelegramMessage(chatId, messageId, updated, leadKeyboard(leadId))
-            } catch (editError) {
-              console.warn('[telegram] Could not edit callback message; confirmation was sent', editError)
+              await editTelegramMessage(chatId, messageId, `${callback.message.text}\n\n<b>Partner response:</b> ${esc(label)}`, leadKeyboard(leadId))
+            } catch (e) {
+              console.warn('[telegram] message edit failed after successful status update', e)
             }
           }
         }
-      } else {
-        await answerTelegramCallback(callback.id, 'Invalid action')
-      }
+      } else await answerTelegramCallback(callback.id, 'Invalid action')
       return NextResponse.json({ ok: true })
     }
 
@@ -64,84 +61,57 @@ export async function POST(req: NextRequest) {
 
     if (text === '/start' || text === '/help') {
       const { data: company } = await supabase.from('companies').select('name,status,is_owner').eq('telegram_chat_id', chatId).maybeSingle()
-      if (!company) {
-        await sendTelegramMessage(chatId, `<b>Easy Shift CRM</b>\n\nYour Telegram is not linked to a partner company yet.\n\nPlease send this Chat ID to Easy Shift Admin:\n<b>${esc(chatId)}</b>`)
-      } else {
-        await sendTelegramMessage(chatId, `<b>Easy Shift CRM</b>\nCompany: ${esc(company.name)}\n\nYou will receive new leads here automatically. Use the buttons on each lead to update the response.`)
-      }
+      await sendTelegramMessage(chatId, company
+        ? `<b>Easy Shift CRM</b>\nCompany: ${esc(company.name)}\n\nYou will receive new leads here automatically. Use the buttons on each lead to update the response.`
+        : `<b>Easy Shift CRM</b>\n\nYour Telegram is not linked to a partner company yet.\n\nPlease send this Chat ID to Easy Shift Admin:\n<b>${esc(chatId)}</b>`)
       return NextResponse.json({ ok: true })
     }
 
-    // Amount updates support BOTH safe methods:
-    // 1) Reply directly to the lead message: QUOTE 25000 / BOOKED 45000
-    // 2) Include the unique Lead Number: QUOTE ES-20260829-123456-ABCD 25000
-    // A reply can also fall back to the Lead Number printed in the replied-to message.
     const replyMessageId = Number(message.reply_to_message?.message_id ?? 0)
     const replyText = String(message.reply_to_message?.text || '')
-    const replyAmountMatch = text.match(/^(QUOTE|BOOKED)\s+([0-9,]+)$/i)
-    const leadNumberAmountMatch = text.match(/^(QUOTE|BOOKED)\s+(ES-[A-Z0-9-]+)\s+([0-9,]+)$/i)
+    const replyMatch = text.match(/^(QUOTE|BOOKED)\s+([0-9,]+)$/i)
+    const numberMatch = text.match(/^(QUOTE|BOOKED)\s+(ES-[A-Z0-9-]+)\s+([0-9,]+)$/i)
 
-    if (replyAmountMatch || leadNumberAmountMatch) {
-      const kind = String((replyAmountMatch || leadNumberAmountMatch)?.[1] || '').toUpperCase()
-      const amountText = String((replyAmountMatch || leadNumberAmountMatch)?.[replyAmountMatch ? 2 : 3] || '')
-      const leadNumber = (leadNumberAmountMatch?.[2] || extractLeadNumber(replyText)).toUpperCase()
+    if (replyMatch || numberMatch) {
+      const kind = String((replyMatch || numberMatch)?.[1] || '').toUpperCase()
+      const amountText = String((replyMatch || numberMatch)?.[replyMatch ? 2 : 3] || '')
+      const suppliedLeadNumber = numberMatch?.[2] || ''
+      const repliedLeadNumber = extractLeadNumber(replyText)
       const amount = Number(amountText.replace(/,/g, ''))
+      const { data: company, error: companyError } = await supabase.from('companies').select('id,name').eq('telegram_chat_id', chatId).eq('status','active').eq('is_owner',false).maybeSingle()
+      if (companyError || !company) {
+        await sendTelegramMessage(chatId, '❌ This Telegram group is not linked to an active partner company.')
+        return NextResponse.json({ ok: true })
+      }
+
       let leadId = ''
-      let resolvedLeadNumber = leadNumber
+      let leadNumber = (suppliedLeadNumber || repliedLeadNumber).toUpperCase()
 
-      // Preferred reply lookup: exact Telegram message ID + current partner chat.
+      // First preference: exact assignment message in this Telegram group.
       if (replyMessageId) {
-        const { data: assignments, error: assignmentError } = await supabase
-          .from('lead_assignments')
-          .select('lead_id, leads(lead_number)')
-          .eq('telegram_chat_id', chatId)
-          .eq('telegram_message_id', replyMessageId)
-          .eq('status', 'active')
-          .limit(1)
-        if (assignmentError) {
-          console.warn('[telegram] reply assignment lookup failed', assignmentError)
-        } else if (assignments?.[0]?.lead_id) {
-          leadId = assignments[0].lead_id
-          const nestedLead = Array.isArray(assignments[0].leads) ? assignments[0].leads[0] : assignments[0].leads
-          resolvedLeadNumber = String(nestedLead?.lead_number || resolvedLeadNumber).toUpperCase()
+        const { data: assignment } = await supabase.from('lead_assignments').select('lead_id,leads(lead_number)').eq('company_id', company.id).eq('telegram_chat_id', chatId).eq('telegram_message_id', replyMessageId).eq('status','active').limit(1).maybeSingle()
+        if (assignment?.lead_id) {
+          leadId = assignment.lead_id
+          const nested = Array.isArray(assignment.leads) ? assignment.leads[0] : assignment.leads
+          leadNumber = String(nested?.lead_number || leadNumber).toUpperCase()
         }
       }
 
-      // Fallback for replies where the message ID was not stored: extract the Lead Number
-      // from the original Telegram message being replied to.
-      if (!leadId && resolvedLeadNumber) {
-        const { data: leads, error: leadError } = await supabase
-          .from('leads')
-          .select('id,lead_number')
-          .eq('lead_number', resolvedLeadNumber)
-          .limit(1)
-        if (leadError) {
-          await sendTelegramMessage(chatId, `❌ Could not find lead <b>${esc(resolvedLeadNumber)}</b>: ${esc(leadError.message)}`)
-          return NextResponse.json({ ok: true })
-        }
-        if (leads?.[0]) leadId = leads[0].id
-      }
-
-      // Final safety check: the lead must have an active assignment to this Telegram chat.
-      if (leadId) {
-        const { data: assigned } = await supabase
-          .from('lead_assignments')
-          .select('id,lead_id')
-          .eq('lead_id', leadId)
-          .eq('telegram_chat_id', chatId)
-          .eq('status', 'active')
-          .limit(1)
-        if (!assigned?.[0]) leadId = ''
+      // Second preference: unique Lead Number, scoped to this company.
+      if (!leadId && leadNumber) {
+        const { data: lead } = await supabase.from('leads').select('id,lead_number').eq('lead_number', leadNumber).eq('assigned_company_id', company.id).limit(1).maybeSingle()
+        if (lead) leadId = lead.id
       }
 
       if (!leadId) {
-        await sendTelegramMessage(chatId, resolvedLeadNumber
-          ? `❌ Lead <b>${esc(resolvedLeadNumber)}</b> is not assigned to this Telegram group.`
-          : '❌ I could not identify the lead. Reply directly to the lead message, or use: <b>QUOTE LeadNumber 25000</b> / <b>BOOKED LeadNumber 45000</b>.')
+        await sendTelegramMessage(chatId, leadNumber
+          ? `❌ Lead <b>${esc(leadNumber)}</b> is not assigned to this Telegram group.`
+          : '❌ I could not identify the lead. Reply directly to the lead message, or use <b>QUOTE LeadNumber 25000</b> / <b>BOOKED LeadNumber 45000</b>.')
         return NextResponse.json({ ok: true })
       }
 
       const responseStatus = kind === 'BOOKED' ? 'booking_confirmed' : 'quotation_sent'
+      // Update through the RPC after we have already resolved and security-scoped the lead.
       const { error } = await supabase.rpc('telegram_update_assignment', {
         p_lead_id: leadId,
         p_chat_id: chatId,
@@ -155,9 +125,7 @@ export async function POST(req: NextRequest) {
         await sendTelegramMessage(chatId, `❌ <b>Lead update failed</b>\n\n${esc(error.message)}`)
       } else {
         const label = responseStatus.replaceAll('_', ' ')
-        const numberLabel = resolvedLeadNumber ? `\nLead: <b>${esc(resolvedLeadNumber)}</b>` : ''
-        const amountLabel = kind === 'QUOTE' ? 'Quote Amount' : 'Booking Value'
-        await sendTelegramMessage(chatId, `✅ <b>${kind === 'QUOTE' ? 'Quote' : 'Booking'} recorded</b>${numberLabel}\n${amountLabel}: <b>₹${amount.toLocaleString('en-IN')}</b>\nStatus: <b>${esc(label)}</b>`)
+        await sendTelegramMessage(chatId, `✅ <b>${kind === 'QUOTE' ? 'Quote' : 'Booking'} recorded</b>\nLead: <b>${esc(leadNumber)}</b>\n${kind === 'QUOTE' ? 'Quote Amount' : 'Booking Value'}: <b>₹${amount.toLocaleString('en-IN')}</b>\nStatus: <b>${esc(label)}</b>`)
       }
       return NextResponse.json({ ok: true })
     }
