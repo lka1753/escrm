@@ -34,13 +34,15 @@ export function formatLeadMessage(lead: any, companyName: string) {
 export async function notifyPartnersForLead(leadId: string) {
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN is not configured')
   const supabase = createAdminClient()
-  const [{ data: lead, error: leadError }, { data: assignments, error: assignmentError }] = await Promise.all([
-    supabase.from('leads').select('id,lead_number,name,mobile,pickup_location,drop_location,moving_date,service_type,property_size,source').eq('id', leadId).single(),
+  const [{ data: leads, error: leadError }, { data: assignments, error: assignmentError }] = await Promise.all([
+    supabase.from('leads').select('id,lead_number,name,mobile,pickup_location,drop_location,moving_date,service_type,property_size,source').eq('id', leadId).limit(1),
     supabase.from('lead_assignments').select('id,company_id,telegram_chat_id').eq('lead_id', leadId).eq('status', 'active'),
   ])
   if (leadError) throw new Error(`Lead lookup failed: ${leadError.message}`)
   if (assignmentError) throw new Error(`Assignment lookup failed: ${assignmentError.message}`)
-  if (!lead || !assignments?.length) throw new Error('No active lead assignment found')
+  const lead = leads?.[0]
+  if (!lead) throw new Error(`Lead not found: ${leadId}`)
+  if (!assignments?.length) throw new Error('No active lead assignment found')
   const companyIds = assignments.map(a => a.company_id)
   const { data: companies, error: companyError } = await supabase.from('companies').select('id,name,telegram_chat_id').in('id', companyIds).eq('status', 'active').eq('is_owner', false)
   if (companyError) throw new Error(`Company lookup failed: ${companyError.message}`)
