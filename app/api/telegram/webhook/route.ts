@@ -9,9 +9,6 @@ function esc(value: unknown) {
 }
 
 function webhookAuthorized(req: NextRequest) {
-  // Telegram can optionally send X-Telegram-Bot-Api-Secret-Token.
-  // During initial setup, allow the webhook when no secret has been configured.
-  // Once TELEGRAM_WEBHOOK_SECRET is configured, require an exact match.
   const expected = process.env.TELEGRAM_WEBHOOK_SECRET
   if (!expected) return true
   return req.headers.get('x-telegram-bot-api-secret-token') === expected
@@ -32,16 +29,23 @@ export async function POST(req: NextRequest) {
       if (parts.length === 3 && parts[0] === 'lead') {
         const leadId = parts[1]
         const responseStatus = parts[2]
-        const { data, error } = await supabase.rpc('telegram_update_assignment', { p_lead_id: leadId, p_chat_id: chatId, p_response_status: responseStatus, p_message_id: messageId })
+        const { error } = await supabase.rpc('telegram_update_assignment', { p_lead_id: leadId, p_chat_id: chatId, p_response_status: responseStatus, p_message_id: messageId })
         if (error) {
-          await answerTelegramCallback(callback.id, 'This lead is not assigned to your company.')
+          await answerTelegramCallback(callback.id, 'Could not update this lead.')
+          await sendTelegramMessage(chatId, `❌ <b>Lead update failed</b>\n\n${esc(error.message)}`)
         } else {
-          await answerTelegramCallback(callback.id, `Updated: ${responseStatus.replaceAll('_', ' ')}`)
+          const label = responseStatus.replaceAll('_', ' ')
+          await answerTelegramCallback(callback.id, `Updated: ${label}`)
+          // Always send a visible confirmation. Message editing is best-effort only.
+          await sendTelegramMessage(chatId, `✅ <b>Status updated</b>\nLead response: <b>${esc(label)}</b>`)
           if (callback.message?.text) {
-            const updated = `${callback.message.text}\n\n<b>Partner response:</b> ${esc(responseStatus.replaceAll('_', ' '))}`
-            await editTelegramMessage(chatId, messageId, updated, leadKeyboard(leadId))
+            const updated = `${callback.message.text}\n\n<b>Partner response:</b> ${esc(label)}`
+            try {
+              await editTelegramMessage(chatId, messageId, updated, leadKeyboard(leadId))
+            } catch (editError) {
+              console.warn('[telegram] Could not edit callback message; confirmation was sent', editError)
+            }
           }
-          void data
         }
       } else {
         await answerTelegramCallback(callback.id, 'Invalid action')
@@ -81,7 +85,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true })
     }
 
-    await sendTelegramMessage(chatId, 'Use the buttons on a lead message to update it. For amounts, reply to the lead message with QUOTE 25000 or BOOKED 45000.')
+    await sendTelegramMessage(chatId, 'Use the buttons on a lead message to update the response. For amounts, reply to the lead message with QUOTE 25000 or BOOKED 45000.')
     return NextResponse.json({ ok: true })
   } catch (error) {
     console.error('Telegram webhook error', error)
