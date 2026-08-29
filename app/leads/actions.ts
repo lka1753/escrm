@@ -51,7 +51,26 @@ export async function createLead(formData: FormData) {
   })
 
   if (error || !leadId) throw new Error(error?.message || 'Lead was not created')
-  try { await notifyPartnersForLead(String(leadId)) } catch (telegramError) { console.error('Lead created but Telegram notification failed', telegramError) }
+
+  // Send through a dedicated Vercel route so Telegram delivery is isolated from the form request.
+  try {
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://escrm-puce.vercel.app'
+    const internalKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (internalKey) {
+      const response = await fetch(`${baseUrl}/api/telegram/notify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-crm-internal-key': internalKey },
+        body: JSON.stringify({ leadId: String(leadId) }),
+        cache: 'no-store',
+      })
+      if (!response.ok) console.error('Telegram notify endpoint returned', response.status, await response.text().catch(() => ''))
+    } else {
+      await notifyPartnersForLead(String(leadId))
+    }
+  } catch (telegramError) {
+    console.error('Lead created but Telegram notification failed', telegramError)
+  }
+
   revalidatePath('/leads')
   revalidatePath('/')
 }
