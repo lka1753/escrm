@@ -84,56 +84,56 @@ export async function POST(req: NextRequest) {
       const suppliedLeadNumber = numberMatch?.[2] || ''
       const repliedLeadNumber = extractLeadNumber(replyText)
       const amount = Number(amountText.replace(/,/g, ''))
+      const leadNumber = (suppliedLeadNumber || repliedLeadNumber).toUpperCase()
 
-      // Resolve the partner by Telegram chat ID without using maybeSingle().
-      // This is deliberately tolerant of duplicate/legacy company rows while still
-      // requiring an active non-owner partner company.
-      const { data: companies, error: companyError } = await supabase
-        .from('companies')
-        .select('id,name,status,is_owner,telegram_chat_id')
-        .eq('telegram_chat_id', chatId)
-        .limit(20)
-      const company = companies?.find((c: any) => c.status === 'active' && c.is_owner === false)
-      if (companyError) console.warn('[telegram] quote company lookup failed', { chatId, error: companyError })
-      if (!company) {
-        console.warn('[telegram] no active partner company for Telegram chat', { chatId, companies })
-        await sendTelegramMessage(chatId, '❌ This Telegram group is not linked to an active partner company.')
-        return NextResponse.json({ ok: true })
-      }
-
+      // Resolve the lead using the actual Telegram assignment mapping.
+      // This avoids depending on leads.assigned_company_id or a separate company
+      // lookup, both of which can differ from the assignment used to send the lead.
       let leadId = ''
-      let leadNumber = (suppliedLeadNumber || repliedLeadNumber).toUpperCase()
+      let resolvedLeadNumber = leadNumber
 
-      // First preference: exact assignment message in this Telegram group.
       if (replyMessageId) {
         const { data: assignments, error: assignmentError } = await supabase
           .from('lead_assignments')
-          .select('lead_id,leads(lead_number)')
-          .eq('company_id', company.id)
+          .select('lead_id,company_id,telegram_chat_id,telegram_message_id,leads(lead_number)')
           .eq('telegram_chat_id', chatId)
           .eq('telegram_message_id', replyMessageId)
           .eq('status', 'active')
-          .limit(1)
-        if (assignmentError) console.warn('[telegram] reply assignment lookup failed', assignmentError)
+          .limit(20)
+        if (assignmentError) console.warn('[telegram] reply assignment lookup failed', { chatId, replyMessageId, error: assignmentError })
         const assignment = assignments?.[0]
         if (assignment?.lead_id) {
           leadId = assignment.lead_id
           const nested = Array.isArray(assignment.leads) ? assignment.leads[0] : assignment.leads
-          leadNumber = String(nested?.lead_number || leadNumber).toUpperCase()
+          resolvedLeadNumber = String(nested?.lead_number || resolvedLeadNumber).toUpperCase()
         }
       }
 
-      // Second preference: unique Lead Number, scoped to this partner company.
+      // Lead-number method: first resolve the lead by its unique Lead Number,
+      // then verify that an active Telegram assignment for this exact group exists.
       if (!leadId && leadNumber) {
-        const { data: lead, error: leadError } = await supabase
+        const { data: leads, error: leadError } = await supabase
           .from('leads')
-          .select('id,lead_number,assigned_company_id')
+          .select('id,lead_number')
           .eq('lead_number', leadNumber)
-          .eq('assigned_company_id', company.id)
-          .limit(1)
-          .maybeSingle()
-        if (leadError) console.warn('[telegram] lead number lookup failed', { leadNumber, companyId: company.id, error: leadError })
-        if (lead) leadId = lead.id
+          .limit(20)
+        if (leadError) console.warn('[telegram] lead number lookup failed', { leadNumber, error: leadError })
+
+        for (const lead of leads || []) {
+          const { data: assignments, error: assignmentError } = await supabase
+            .from('lead_assignments')
+            .select('lead_id,telegram_chat_id,telegram_message_id,status')
+            .eq('lead_id', lead.id)
+            .eq('telegram_chat_id', chatId)
+            .eq('status', 'active')
+            .limit(20)
+          if (assignmentError) console.warn('[telegram] lead-number assignment lookup failed', { leadNumber, leadId: lead.id, chatId, error: assignmentError })
+          if (assignments?.length) {
+            leadId = lead.id
+            resolvedLeadNumber = String(lead.lead_number || leadNumber).toUpperCase()
+            break
+          }
+        }
       }
 
       if (!leadId) {
@@ -157,7 +157,7 @@ export async function POST(req: NextRequest) {
         await sendTelegramMessage(chatId, `❌ <b>Lead update failed</b>\n\n${esc(error.message)}`)
       } else {
         const label = responseStatus.replaceAll('_', ' ')
-        await sendTelegramMessage(chatId, `✅ <b>${kind === 'QUOTE' ? 'Quote' : 'Booking'} recorded</b>\nLead: <b>${esc(leadNumber)}</b>\n${kind === 'QUOTE' ? 'Quote Amount' : 'Booking Value'}: <b>₹${amount.toLocaleString('en-IN')}</b>\nStatus: <b>${esc(label)}</b>`)
+        await sendTelegramMessage(chatId, `✅ <b>${kind === 'QUOTE' ? 'Quote' : 'Booking'} recorded</b>\nLead: <b>${esc(resolvedLeadNumber)}</b>\n${kind === 'QUOTE' ? 'Quote Amount' : 'Booking Value'}: <b>₹${amount.toLocaleString('en-IN')}</b>\nStatus: <b>${esc(label)}</b>`)
       }
       return NextResponse.json({ ok: true })
     }
