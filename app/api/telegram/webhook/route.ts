@@ -14,6 +14,11 @@ function webhookAuthorized(req: NextRequest) {
   return req.headers.get('x-telegram-bot-api-secret-token') === expected
 }
 
+function extractLeadNumber(value: unknown) {
+  const match = String(value || '').match(/\bES-[A-Z0-9-]+\b/i)
+  return match?.[0]?.toUpperCase() || ''
+}
+
 export async function POST(req: NextRequest) {
   if (!webhookAuthorized(req)) return new NextResponse('Unauthorized', { status: 401 })
   const update = await req.json().catch(() => null)
@@ -70,40 +75,69 @@ export async function POST(req: NextRequest) {
     // Amount updates support BOTH safe methods:
     // 1) Reply directly to the lead message: QUOTE 25000 / BOOKED 45000
     // 2) Include the unique Lead Number: QUOTE ES-20260829-123456-ABCD 25000
-    //    This remains unambiguous even when many leads are active in the same group.
+    // A reply can also fall back to the Lead Number printed in the replied-to message.
     const replyMessageId = Number(message.reply_to_message?.message_id ?? 0)
+    const replyText = String(message.reply_to_message?.text || '')
     const replyAmountMatch = text.match(/^(QUOTE|BOOKED)\s+([0-9,]+)$/i)
     const leadNumberAmountMatch = text.match(/^(QUOTE|BOOKED)\s+(ES-[A-Z0-9-]+)\s+([0-9,]+)$/i)
 
     if (replyAmountMatch || leadNumberAmountMatch) {
       const kind = String((replyAmountMatch || leadNumberAmountMatch)?.[1] || '').toUpperCase()
       const amountText = String((replyAmountMatch || leadNumberAmountMatch)?.[replyAmountMatch ? 2 : 3] || '')
-      const leadNumber = leadNumberAmountMatch?.[2] || ''
+      const leadNumber = (leadNumberAmountMatch?.[2] || extractLeadNumber(replyText)).toUpperCase()
       const amount = Number(amountText.replace(/,/g, ''))
       let leadId = ''
+      let resolvedLeadNumber = leadNumber
 
-      if (leadNumber) {
-        const { data: lead, error: leadError } = await supabase.from('leads').select('id,lead_number').eq('lead_number', leadNumber).limit(1).maybeSingle()
-        if (leadError) {
-          await sendTelegramMessage(chatId, `❌ Could not find lead <b>${esc(leadNumber)}</b>: ${esc(leadError.message)}`)
-          return NextResponse.json({ ok: true })
-        }
-        if (!lead) {
-          await sendTelegramMessage(chatId, `❌ Lead <b>${esc(leadNumber)}</b> was not found. Please check the Lead Number.`)
-          return NextResponse.json({ ok: true })
-        }
-        leadId = lead.id
-      } else if (replyMessageId) {
-        const { data: assignments, error: assignmentError } = await supabase.from('lead_assignments').select('lead_id').eq('telegram_chat_id', chatId).eq('telegram_message_id', replyMessageId).eq('status', 'active').limit(1)
+      // Preferred reply lookup: exact Telegram message ID + current partner chat.
+      if (replyMessageId) {
+        const { data: assignments, error: assignmentError } = await supabase
+          .from('lead_assignments')
+          .select('lead_id, leads(lead_number)')
+          .eq('telegram_chat_id', chatId)
+          .eq('telegram_message_id', replyMessageId)
+          .eq('status', 'active')
+          .limit(1)
         if (assignmentError) {
-          await sendTelegramMessage(chatId, `❌ Could not identify the replied lead: ${esc(assignmentError.message)}`)
+          console.warn('[telegram] reply assignment lookup failed', assignmentError)
+        } else if (assignments?.[0]?.lead_id) {
+          leadId = assignments[0].lead_id
+          const nestedLead = Array.isArray(assignments[0].leads) ? assignments[0].leads[0] : assignments[0].leads
+          resolvedLeadNumber = String(nestedLead?.lead_number || resolvedLeadNumber).toUpperCase()
+        }
+      }
+
+      // Fallback for replies where the message ID was not stored: extract the Lead Number
+      // from the original Telegram message being replied to.
+      if (!leadId && resolvedLeadNumber) {
+        const { data: leads, error: leadError } = await supabase
+          .from('leads')
+          .select('id,lead_number')
+          .eq('lead_number', resolvedLeadNumber)
+          .limit(1)
+        if (leadError) {
+          await sendTelegramMessage(chatId, `❌ Could not find lead <b>${esc(resolvedLeadNumber)}</b>: ${esc(leadError.message)}`)
           return NextResponse.json({ ok: true })
         }
-        leadId = assignments?.[0]?.lead_id || ''
+        if (leads?.[0]) leadId = leads[0].id
+      }
+
+      // Final safety check: the lead must have an active assignment to this Telegram chat.
+      if (leadId) {
+        const { data: assigned } = await supabase
+          .from('lead_assignments')
+          .select('id,lead_id')
+          .eq('lead_id', leadId)
+          .eq('telegram_chat_id', chatId)
+          .eq('status', 'active')
+          .limit(1)
+        if (!assigned?.[0]) leadId = ''
       }
 
       if (!leadId) {
-        await sendTelegramMessage(chatId, '❌ I could not identify the lead. Either reply directly to the lead message, or use: <b>QUOTE LeadNumber 25000</b> / <b>BOOKED LeadNumber 45000</b>.')
+        await sendTelegramMessage(chatId, resolvedLeadNumber
+          ? `❌ Lead <b>${esc(resolvedLeadNumber)}</b> is not assigned to this Telegram group.`
+          : '❌ I could not identify the lead. Reply directly to the lead message, or use: <b>QUOTE LeadNumber 25000</b> / <b>BOOKED LeadNumber 45000</b>.')
         return NextResponse.json({ ok: true })
       }
 
@@ -121,7 +155,7 @@ export async function POST(req: NextRequest) {
         await sendTelegramMessage(chatId, `❌ <b>Lead update failed</b>\n\n${esc(error.message)}`)
       } else {
         const label = responseStatus.replaceAll('_', ' ')
-        const numberLabel = leadNumber ? `\nLead: <b>${esc(leadNumber)}</b>` : ''
+        const numberLabel = resolvedLeadNumber ? `\nLead: <b>${esc(resolvedLeadNumber)}</b>` : ''
         const amountLabel = kind === 'QUOTE' ? 'Quote Amount' : 'Booking Value'
         await sendTelegramMessage(chatId, `✅ <b>${kind === 'QUOTE' ? 'Quote' : 'Booking'} recorded</b>${numberLabel}\n${amountLabel}: <b>₹${amount.toLocaleString('en-IN')}</b>\nStatus: <b>${esc(label)}</b>`)
       }
