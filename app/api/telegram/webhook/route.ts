@@ -60,7 +60,13 @@ export async function POST(req: NextRequest) {
     const text = String(message.text || '').trim()
 
     if (text === '/start' || text === '/help') {
-      const { data: company } = await supabase.from('companies').select('name,status,is_owner').eq('telegram_chat_id', chatId).maybeSingle()
+      const { data: companies, error: companyError } = await supabase
+        .from('companies')
+        .select('name,status,is_owner')
+        .eq('telegram_chat_id', chatId)
+        .limit(20)
+      const company = companies?.find((c: any) => c.status === 'active' && c.is_owner === false)
+      if (companyError) console.warn('[telegram] company lookup failed', companyError)
       await sendTelegramMessage(chatId, company
         ? `<b>Easy Shift CRM</b>\nCompany: ${esc(company.name)}\n\nYou will receive new leads here automatically. Use the buttons on each lead to update the response.`
         : `<b>Easy Shift CRM</b>\n\nYour Telegram is not linked to a partner company yet.\n\nPlease send this Chat ID to Easy Shift Admin:\n<b>${esc(chatId)}</b>`)
@@ -78,8 +84,19 @@ export async function POST(req: NextRequest) {
       const suppliedLeadNumber = numberMatch?.[2] || ''
       const repliedLeadNumber = extractLeadNumber(replyText)
       const amount = Number(amountText.replace(/,/g, ''))
-      const { data: company, error: companyError } = await supabase.from('companies').select('id,name').eq('telegram_chat_id', chatId).eq('status','active').eq('is_owner',false).maybeSingle()
-      if (companyError || !company) {
+
+      // Resolve the partner by Telegram chat ID without using maybeSingle().
+      // This is deliberately tolerant of duplicate/legacy company rows while still
+      // requiring an active non-owner partner company.
+      const { data: companies, error: companyError } = await supabase
+        .from('companies')
+        .select('id,name,status,is_owner,telegram_chat_id')
+        .eq('telegram_chat_id', chatId)
+        .limit(20)
+      const company = companies?.find((c: any) => c.status === 'active' && c.is_owner === false)
+      if (companyError) console.warn('[telegram] quote company lookup failed', { chatId, error: companyError })
+      if (!company) {
+        console.warn('[telegram] no active partner company for Telegram chat', { chatId, companies })
         await sendTelegramMessage(chatId, '❌ This Telegram group is not linked to an active partner company.')
         return NextResponse.json({ ok: true })
       }
@@ -89,7 +106,16 @@ export async function POST(req: NextRequest) {
 
       // First preference: exact assignment message in this Telegram group.
       if (replyMessageId) {
-        const { data: assignment } = await supabase.from('lead_assignments').select('lead_id,leads(lead_number)').eq('company_id', company.id).eq('telegram_chat_id', chatId).eq('telegram_message_id', replyMessageId).eq('status','active').limit(1).maybeSingle()
+        const { data: assignments, error: assignmentError } = await supabase
+          .from('lead_assignments')
+          .select('lead_id,leads(lead_number)')
+          .eq('company_id', company.id)
+          .eq('telegram_chat_id', chatId)
+          .eq('telegram_message_id', replyMessageId)
+          .eq('status', 'active')
+          .limit(1)
+        if (assignmentError) console.warn('[telegram] reply assignment lookup failed', assignmentError)
+        const assignment = assignments?.[0]
         if (assignment?.lead_id) {
           leadId = assignment.lead_id
           const nested = Array.isArray(assignment.leads) ? assignment.leads[0] : assignment.leads
@@ -97,9 +123,16 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Second preference: unique Lead Number, scoped to this company.
+      // Second preference: unique Lead Number, scoped to this partner company.
       if (!leadId && leadNumber) {
-        const { data: lead } = await supabase.from('leads').select('id,lead_number').eq('lead_number', leadNumber).eq('assigned_company_id', company.id).limit(1).maybeSingle()
+        const { data: lead, error: leadError } = await supabase
+          .from('leads')
+          .select('id,lead_number,assigned_company_id')
+          .eq('lead_number', leadNumber)
+          .eq('assigned_company_id', company.id)
+          .limit(1)
+          .maybeSingle()
+        if (leadError) console.warn('[telegram] lead number lookup failed', { leadNumber, companyId: company.id, error: leadError })
         if (lead) leadId = lead.id
       }
 
@@ -111,7 +144,6 @@ export async function POST(req: NextRequest) {
       }
 
       const responseStatus = kind === 'BOOKED' ? 'booking_confirmed' : 'quotation_sent'
-      // Update through the RPC after we have already resolved and security-scoped the lead.
       const { error } = await supabase.rpc('telegram_update_assignment', {
         p_lead_id: leadId,
         p_chat_id: chatId,
