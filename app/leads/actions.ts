@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache'
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
-import { notifyPartnersForLead } from '@/lib/telegram'
+import { sendTelegramMessage, formatLeadMessage, leadKeyboard } from '@/lib/telegram'
 
 function formValue(formData: FormData, name: string) {
   const value = formData.get(name)
@@ -52,21 +52,65 @@ export async function createLead(formData: FormData) {
 
   if (error || !leadId) throw new Error(error?.message || 'Lead was not created')
 
-  // Send through a dedicated Vercel route so Telegram delivery is isolated from the form request.
+  // Use the same authenticated Supabase connection that created the lead.
+  // This avoids the production service-role lookup mismatch that previously
+  // caused /api/telegram/notify to report the lead as missing.
   try {
-    const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://escrm-puce.vercel.app'
-    const internalKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-    if (internalKey) {
-      const response = await fetch(`${baseUrl}/api/telegram/notify`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-crm-internal-key': internalKey },
-        body: JSON.stringify({ leadId: String(leadId) }),
-        cache: 'no-store',
-      })
-      if (!response.ok) console.error('Telegram notify endpoint returned', response.status, await response.text().catch(() => ''))
-    } else {
-      await notifyPartnersForLead(String(leadId))
+    const id = String(leadId)
+    const { data: lead, error: leadError } = await supabase
+      .from('leads')
+      .select('id,lead_number,name,mobile,pickup_location,drop_location,moving_date,service_type,property_size,source')
+      .eq('id', id)
+      .maybeSingle()
+    if (leadError) throw new Error(`Lead lookup failed: ${leadError.message}`)
+    if (!lead) throw new Error(`Lead not found after creation: ${id}`)
+
+    const { data: assignments, error: assignmentError } = await supabase
+      .from('lead_assignments')
+      .select('id,company_id,telegram_chat_id')
+      .eq('lead_id', id)
+      .eq('status', 'active')
+    if (assignmentError) throw new Error(`Assignment lookup failed: ${assignmentError.message}`)
+
+    const companyIds = (assignments ?? []).map(a => a.company_id)
+    if (!companyIds.length) throw new Error('No active lead assignment found')
+
+    const { data: companies, error: companyError } = await supabase
+      .from('companies')
+      .select('id,name,telegram_chat_id')
+      .in('id', companyIds)
+      .eq('status', 'active')
+      .eq('is_owner', false)
+    if (companyError) throw new Error(`Company lookup failed: ${companyError.message}`)
+
+    let sent = 0
+    for (const company of companies ?? []) {
+      if (!company.telegram_chat_id) {
+        console.warn('[telegram] Company has no Telegram chat ID', company.id, company.name)
+        continue
+      }
+      try {
+        const result = await sendTelegramMessage(
+          company.telegram_chat_id,
+          formatLeadMessage(lead, company.name),
+          leadKeyboard(lead.id)
+        )
+        const messageId = result?.message_id
+        if (!messageId) throw new Error('Telegram returned no message_id')
+        const { error: updateError } = await supabase
+          .from('lead_assignments')
+          .update({ telegram_chat_id: company.telegram_chat_id, telegram_message_id: messageId })
+          .eq('lead_id', lead.id)
+          .eq('company_id', company.id)
+          .eq('status', 'active')
+        if (updateError) throw new Error(`Assignment update failed: ${updateError.message}`)
+        sent++
+        console.log('[telegram] Lead notification sent', lead.id, company.name, messageId)
+      } catch (telegramError) {
+        console.error('[telegram] Lead notification failed', company.id, company.name, telegramError)
+      }
     }
+    if (!sent) throw new Error('No partner Telegram notification was sent')
   } catch (telegramError) {
     console.error('Lead created but Telegram notification failed', telegramError)
   }
